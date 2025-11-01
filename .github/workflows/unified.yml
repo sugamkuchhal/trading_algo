@@ -1,0 +1,183 @@
+name: unified-run
+
+on:
+  schedule:
+    # canonical cron lines borrowed from original unified.yml (UTC)
+    - cron: "0,30 4-9 * * *"
+    - cron: "30 10 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode: SARAS | VS | BOTH"
+        required: false
+        default: "BOTH"
+      command:
+        description: "Optional command override"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  unified:
+    runs-on: ubuntu-latest
+    env:
+      REPO: sugamkuchhal/trading_algo
+      ALERT_TO: sugamkuchhal@gmail.com
+      SMTP_HOST: smtp.gmail.com
+      SMTP_PORT: "587"
+      SMTP_USER: sugamkuchhal@gmail.com
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install runner deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f trading_algo/requirements.txt ]; then pip install -r trading_algo/requirements.txt; fi
+          # install kiteconnect if needed for preflight ping
+          pip install kiteconnect
+
+      - name: Determine mode
+        id: mode
+        run: |
+          echo "mode=${{ github.event.inputs.mode || 'BOTH' }}" >> $GITHUB_OUTPUT
+          echo "command=${{ github.event.inputs.command || '' }}" >> $GITHUB_OUTPUT
+
+      - name: Preflight check tokens
+        id: preflight
+        run: |
+          python - <<'PY'
+import os, sys
+from kiteconnect import KiteConnect
+out = {}
+mode = os.getenv("INPUT_MODE", os.environ.get("mode", "BOTH"))
+# helper to set outputs
+def set_out(name, value):
+    print(f"::set-output name={name}::{value}")
+
+# Check SARAS token if needed
+need_saras = False
+need_vs = False
+m = os.getenv("GITHUB_ENV")  # not used
+mode = os.getenv("MODE", os.environ.get("mode", "BOTH"))
+mode = os.getenv("MODE", mode)
+# read tokens from env (passed below)
+saras_token = os.getenv("ACCESS_TOKEN_SARAS")
+vs_token = os.getenv("ACCESS_TOKEN_VS")
+
+def valid_token(token):
+    if not token:
+        return False
+    try:
+        kc = KiteConnect(api_key="DUMMY")  # api_key unused for profile ping in many libs, but instantiation may vary
+        kc.set_access_token(token)
+        # call profile to test; will raise if invalid
+        _ = kc.profile()
+        return True
+    except Exception:
+        return False
+
+if mode in ("SARAS","BOTH"):
+    ok = valid_token(saras_token)
+    set_out("saras_ok", str(ok).lower())
+else:
+    set_out("saras_ok", "true")
+
+if mode in ("VS","BOTH"):
+    ok2 = valid_token(vs_token)
+    set_out("vs_ok", str(ok2).lower())
+else:
+    set_out("vs_ok", "true")
+PY
+        env:
+          ACCESS_TOKEN_SARAS: ${{ secrets.ACCESS_TOKEN_SARAS }}
+          ACCESS_TOKEN_VS: ${{ secrets.ACCESS_TOKEN_VS }}
+          MODE: ${{ github.event.inputs.mode }}
+
+      - name: Install Chrome if needed (SARAS)
+        if: steps.preflight.outputs.saras_ok == 'false'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+
+      - name: Install Chrome if needed (VS)
+        if: steps.preflight.outputs.vs_ok == 'false'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+
+      - name: Inline refresh SARAS (if needed)
+        if: steps.preflight.outputs.saras_ok == 'false'
+        env:
+          GH_PAT_SARAS: ${{ secrets.ACCESS_TOKEN_GH_PAT_SARAS }}
+        run: |
+          set -euo pipefail
+          export GH_TOKEN="$GH_PAT_SARAS"
+          # run headless auto_login for SARAS (expects tools/auto_login.py)
+          python tools/auto_login.py --env saras --output access_token_saras.txt
+          NEW=$(cat access_token_saras.txt)
+          printf "%s" "$NEW" | gh secret set ACCESS_TOKEN_SARAS --repo $REPO --body -
+
+      - name: Inline refresh VS (if needed)
+        if: steps.preflight.outputs.vs_ok == 'false'
+        env:
+          GH_PAT_VS: ${{ secrets.ACCESS_TOKEN_GH_PAT_VS }}
+        run: |
+          set -euo pipefail
+          export GH_TOKEN="$GH_PAT_VS"
+          python tools/auto_login.py --env vs --output access_token_vs.txt
+          NEW=$(cat access_token_vs.txt)
+          printf "%s" "$NEW" | gh secret set ACCESS_TOKEN_VS --repo $REPO --body -
+
+      - name: Re-run preflight after refresh
+        id: preflight2
+        run: |
+          python - <<'PY'
+import os
+from kiteconnect import KiteConnect
+def ok(token):
+    if not token: return False
+    try:
+        kc = KiteConnect(api_key="DUMMY")
+        kc.set_access_token(token)
+        kc.profile()
+        return True
+    except Exception:
+        return False
+
+s = os.getenv("MODE","BOTH")
+sas = os.getenv("ACCESS_TOKEN_SARAS") if os.getenv("ACCESS_TOKEN_SARAS") else (open('access_token_saras.txt').read().strip() if os.path.exists('access_token_saras.txt') else "")
+vs = os.getenv("ACCESS_TOKEN_VS") if os.getenv("ACCESS_TOKEN_VS") else (open('access_token_vs.txt').read().strip() if os.path.exists('access_token_vs.txt') else "")
+if s in ("SARAS","BOTH"):
+    print("saras_ok=%s" % str(ok(sas)).lower())
+else:
+    print("saras_ok=true")
+if s in ("VS","BOTH"):
+    print("vs_ok=%s" % str(ok(vs)).lower())
+else:
+    print("vs_ok=true")
+PY
+      - name: Run SARAS (if applicable)
+        if: ${{ github.event.inputs.mode == 'SARAS' || github.event.inputs.mode == 'BOTH' }}
+        env:
+          ACCESS_TOKEN_SARAS: ${{ secrets.ACCESS_TOKEN_SARAS }}
+        run: |
+          set -e
+          python3 trading_algo/run_saras.py --config examples/sample_config.yml --command "${{ github.event.inputs.command }}" || (python -c "from trading_algo.trading_algo_failure_mailers import send_failure_email; import os; send_failure_email('unified','SARAS','run','script_exit','${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',''); raise SystemExit(1)")
+
+      - name: Run VS (if applicable)
+        if: ${{ github.event.inputs.mode == 'VS' || github.event.inputs.mode == 'BOTH' }}
+        env:
+          ACCESS_TOKEN_VS: ${{ secrets.ACCESS_TOKEN_VS }}
+        run: |
+          set -e
+          python3 trading_algo/run_vs.py --config examples/sample_config.yml --command "${{ github.event.inputs.command }}" || (python -c "from trading_algo.trading_algo_failure_mailers import send_failure_email; import os; send_failure_email('unified','VS','run','script_exit','${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',''); raise SystemExit(1)")
+
