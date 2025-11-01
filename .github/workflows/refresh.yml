@@ -53,4 +53,3 @@ jobs:
           python tools/auto_login.py --env vs --output access_token_vs.txt || (python -c "from trading_algo.trading_algo_failure_mailers import send_failure_email; send_failure_email('refresh','VS','refresh','auto_login_failed','${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',''); exit(1)")
           NEW=$(cat access_token_vs.txt)
           printf "%s" "$NEW" | gh secret set ACCESS_TOKEN_VS --repo $REPO --body -
-)
