@@ -57,12 +57,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
 
-      - name: Debug Chrome availability
-        run: |
-          google-chrome-stable --version
-          which google-chrome-stable
-          chromedriver --version
-
       - name: Refresh SARAS access token
         run: |
           set -euo pipefail
