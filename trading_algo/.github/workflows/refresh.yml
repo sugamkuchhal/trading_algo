@@ -1,0 +1,55 @@
+name: refresh-tokens
+
+on:
+  schedule:
+    # canonical refresh cron (UTC) from your original refresh-token.yml
+    - cron: "0 19 * * 0-4"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    env:
+      REPO: sugamkuchhal/trading_algo
+      ALERT_TO: sugamkuchhal@gmail.com
+      SMTP_HOST: smtp.gmail.com
+      SMTP_PORT: "587"
+      SMTP_USER: sugamkuchhal@gmail.com
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install refresh deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r trading_algo/requirements-refresh.txt || true
+          pip install kiteconnect
+
+      - name: Refresh SARAS token
+        env:
+          GH_PAT_SARAS: ${{ secrets.ACCESS_TOKEN_GH_PAT_SARAS }}
+        run: |
+          set -euo pipefail
+          export GH_TOKEN="$GH_PAT_SARAS"
+          python tools/auto_login.py --env saras --output access_token_saras.txt || (python -c "from trading_algo.trading_algo_failure_mailers import send_failure_email; send_failure_email('refresh','SARAS','refresh','auto_login_failed','${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',''); exit(1)")
+          NEW=$(cat access_token_saras.txt)
+          printf "%s" "$NEW" | gh secret set ACCESS_TOKEN_SARAS --repo $REPO --body -
+
+      - name: Refresh VS token
+        env:
+          GH_PAT_VS: ${{ secrets.ACCESS_TOKEN_GH_PAT_VS }}
+        run: |
+          set -euo pipefail
+          export GH_TOKEN="$GH_PAT_VS"
+          python tools/auto_login.py --env vs --output access_token_vs.txt || (python -c "from trading_algo.trading_algo_failure_mailers import send_failure_email; send_failure_email('refresh','VS','refresh','auto_login_failed','${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',''); exit(1)")
+          NEW=$(cat access_token_vs.txt)
+          printf "%s" "$NEW" | gh secret set ACCESS_TOKEN_VS --repo $REPO --body -
