@@ -358,7 +358,7 @@ def login_and_get_token(api_key, api_secret, user_id, password, totp_secret, hea
                     log.info("✅ Clicked Continue/Submit")
                 else:
                     log.warning("⚠ Continue/Submit button not found; attempting form submit via JS")
-                    driver.execute_script("var b = document.querySelector('button[type=\\"submit\\"]'); if(b){ b.click(); } else { var f = document.querySelector('form'); if(f){ f.submit(); }}")
+                    driver.execute_script("""var b = document.querySelector('button[type="submit"]'); if(b){ b.click(); } else { var f = document.querySelector('form'); if(f){ f.submit(); }}""")
                     clicked = True
             except Exception as e:
                 log.warning("⚠ Continue click fallback failed: %s", e)
