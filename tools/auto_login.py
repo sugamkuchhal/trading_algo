@@ -285,7 +285,7 @@ def login_and_get_token(api_key, api_secret, user_id, password, totp_secret, hea
                 try:
                     pwd_input.submit()
                 except Exception:
-                    driver.execute_script("document.querySelector('button[type=\\"submit\\"]').click();")
+                    driver.execute_script('document.querySelector('button[type=\"submit\"]').click();')
             log.info("🔒 Entered password and submitted")
 
             for _ in range(6):
