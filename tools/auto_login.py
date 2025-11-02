@@ -2,14 +2,25 @@
 """
 tools/auto_login.py - universal auto-login for SARAS / VS
 
+Single script that:
+ - logs into Zerodha/Kite (handles External TOTP)
+ - generates Kite access_token
+ - saves the token BOTH locally (macOS Keychain or file) AND updates GitHub repo secret (if credentials provided)
+
+Behavior (single code for both flows):
+ - If running on macOS, token will be saved into macOS Keychain (preferred) and also to ~/.config/trading_algo/access_<env>.json (fallback).
+ - If ACCESS_TOKEN_GH_PAT_<ENV> or GH_TOKEN is available the script will update the GitHub Actions secret ACCESS_TOKEN_<ENV> for the configured repo.
+ - If GitHub update fails, the script will log the error but still keep the local copy.
+
 Usage:
   python tools/auto_login.py --env saras
   python tools/auto_login.py --env vs
 
-Notes:
-- Reads consolidated JSON secret ACCESS_JSON_<ENV> if present, otherwise falls back to API_KEY_*/API_SECRET_* etc.
-- Updates GitHub secret ACCESS_TOKEN_<ENV> via `gh secret set` using ACCESS_TOKEN_GH_PAT_<ENV>.
-- Works on macOS (local) and in GitHub Actions (CI).
+Env variables:
+ - API_KEY_<ENV>, API_SECRET_<ENV>, USER_ID_<ENV>, PASSWORD_<ENV>, TOTP_SECRET_<ENV>
+ - ACCESS_JSON_<ENV> (optional JSON blob with those keys)
+ - ACCESS_TOKEN_GH_PAT_<ENV> (optional PAT used to update repo secret)
+ - REPO (optional; default: sugamkuchhal/trading_algo)
 """
 
 import os
@@ -21,7 +32,7 @@ import subprocess
 from urllib.parse import urlparse, parse_qs
 from shutil import which
 
-# optional imports; will error early if selenium/kiteconnect missing
+# Third-party libs used at runtime.
 try:
     import pyotp
     from kiteconnect import KiteConnect
@@ -32,22 +43,15 @@ try:
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
     from selenium.common.exceptions import TimeoutException
-except Exception as e:
-    # Defer import errors until runtime for clearer logs
+except Exception:
+    # We will error later with clearer message if missing
     pass
 
-# Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger("auto_login")
 
 
 def load_env_config(env: str) -> dict:
-    """
-    Load consolidated JSON secret ACCESS_JSON_<ENV> if present,
-    otherwise fall back to individual env vars.
-
-    Returns dict with keys: api_key, api_secret, user_id, password, totp_secret
-    """
     json_name = f"ACCESS_JSON_{env}"
     j = os.environ.get(json_name)
     if j:
@@ -63,7 +67,6 @@ def load_env_config(env: str) -> dict:
         except Exception as e:
             log.error("Failed to parse %s: %s", json_name, e)
             sys.exit(2)
-    # fallback to individual env vars
     return {
         "api_key": os.environ.get(f"API_KEY_{env}"),
         "api_secret": os.environ.get(f"API_SECRET_{env}"),
@@ -73,55 +76,129 @@ def load_env_config(env: str) -> dict:
     }
 
 
-def gh_update_secret(secret_name: str, secret_value: str, repo: str, gh_pat: str) -> None:
-    """Use GitHub CLI to update a secret in the given repository. Exits on failure."""
+def gh_update_secret(secret_name: str, secret_value: str, repo: str, gh_pat_env_name: str) -> bool:
+    """Attempt to update GitHub repo secret using gh CLI.
+    Returns True on success, False on failure. Logs errors but does not exit.
+    Uses ACCESS_TOKEN_GH_PAT_<ENV> or GH_TOKEN from environment if present.
+    """
+    gh_pat = os.environ.get(gh_pat_env_name) or os.environ.get("GH_TOKEN")
+    cmd = ["gh", "secret", "set", secret_name, "--repo", repo, "--body", secret_value]
     env = os.environ.copy()
-    env["GH_TOKEN"] = gh_pat
-    cmd = [
-        "gh",
-        "secret",
-        "set",
-        secret_name,
-        "--repo",
-        repo,
-        "--body",
-        secret_value,
-    ]
-    log.info("🔐 Updating secret %s in %s", secret_name, repo)
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
-    if result.returncode == 0:
-        log.info("✅ Successfully updated secret %s", secret_name)
-    else:
-        log.error("❌ Failed to update secret %s: %s", secret_name, result.stderr.strip())
-        sys.exit(result.returncode)
+    if gh_pat:
+        env["GH_TOKEN"] = gh_pat
+    try:
+        log.info("🔐 Updating secret %s in %s", secret_name, repo)
+        r = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        if r.returncode == 0:
+            log.info("✅ Successfully updated secret %s", secret_name)
+            return True
+        else:
+            log.error("❌ Failed to update secret %s: %s", secret_name, r.stderr.strip())
+            return False
+    except FileNotFoundError:
+        log.error("❌ gh CLI not found in PATH. Install GitHub CLI or provide ACCESS_TOKEN_GH_PAT_<ENV> and GH_TOKEN env.")
+        return False
+    except Exception as e:
+        log.error("❌ Exception while updating secret: %s", e)
+        return False
+
+
+def save_to_keychain(env: str, token: str) -> bool:
+    """Save token to macOS Keychain using `security` CLI. Returns True on success.
+    Uses service name trading_algo_ACCESS_TOKEN_<ENV>.
+    """
+    if sys.platform != "darwin":
+        log.info("Skipping Keychain save: not running on macOS")
+        return False
+    service = f"trading_algo_ACCESS_TOKEN_{env}"
+    try:
+        # -U to update existing item if present
+        cmd = [
+            "security",
+            "add-generic-password",
+            "-a",
+            os.environ.get("USER", "user"),
+            "-s",
+            service,
+            "-w",
+            token,
+            "-U",
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0:
+            log.info("✅ Saved access token to macOS Keychain as %s", service)
+            return True
+        else:
+            # Sometimes add-generic-password fails if item exists; try 'delete' then add.
+            if "already exists" in r.stderr.lower():
+                subprocess.run(["security", "delete-generic-password", "-s", service], capture_output=True)
+                r2 = subprocess.run(cmd, capture_output=True, text=True)
+                if r2.returncode == 0:
+                    log.info("✅ Saved access token to macOS Keychain as %s", service)
+                    return True
+            log.error("❌ Keychain save failed: %s", r.stderr.strip())
+            return False
+    except FileNotFoundError:
+        log.error("❌ security CLI not found; cannot save to macOS Keychain")
+        return False
+    except Exception as e:
+        log.error("❌ Exception saving to Keychain: %s", e)
+        return False
+
+
+def save_to_local_file(env: str, token: str) -> bool:
+    """Save token to ~/.config/trading_algo/access_<env>.json with 600 perms. Returns True on success."""
+    cfg_dir = os.path.expanduser("~/.config/trading_algo")
+    os.makedirs(cfg_dir, exist_ok=True)
+    path = os.path.join(cfg_dir, f"access_{env.lower()}.json")
+    try:
+        with open(path, "w") as fh:
+            json.dump({"access_token": token}, fh)
+        os.chmod(path, 0o600)
+        log.info("✅ Saved access token to %s", path)
+        return True
+    except Exception as e:
+        log.error("❌ Failed to save token to file: %s", e)
+        return False
 
 
 def find_chrome_and_driver():
-    """
-    Return (chrome_binary_path, chromedriver_path).
-    - On CI: prefer google-chrome-stable and system chromedriver (should be installed by workflow).
-    - On mac: try system Chrome path or chrome in PATH; if chromedriver not found, suggest webdriver-manager.
-    """
-    # CI preferred names
     chrome = which("google-chrome-stable") or which("google-chrome")
     driver = which("chromedriver")
-
-    # macOS common path
     if not chrome and sys.platform == "darwin":
         mac_chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
         if os.path.exists(mac_chrome):
             chrome = mac_chrome
-
     return chrome, driver
 
 
+def _find_totp_input(driver, wait, timeout=15):
+    candidates = [
+        (By.XPATH, "//label[contains(text(),'External TOTP')]/following::input[1]"),
+        (By.CSS_SELECTOR, "input[inputmode='numeric']"),
+        (By.CSS_SELECTOR, "input[type='tel']"),
+        (By.CSS_SELECTOR, "input[type='number']"),
+        (By.CSS_SELECTOR, "input[type='text'][maxlength='6']"),
+        (By.XPATH, "//input[not(@type='hidden')][1]"),
+    ]
+    last_exc = None
+    for by, sel in candidates:
+        try:
+            log.info("Trying locator: %s=%s", by, sel)
+            el = WebDriverWait(driver, timeout).until(EC.presence_of_element_located((by, sel)))
+            if el.is_displayed() and el.is_enabled():
+                try:
+                    el = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((by, sel)))
+                except Exception:
+                    pass
+                return el
+        except Exception as e:
+            last_exc = e
+    raise last_exc if last_exc else TimeoutException("TOTP input not found")
+
+
 def login_and_get_token(api_key, api_secret, user_id, password, totp_secret, headless=True) -> str:
-    """
-    Robust login helper with macOS-friendly behavior:
-    - Uses webdriver-manager locally to ensure driver compatibility.
-    - Uses minimal Chrome options for non-headless (visible) runs.
-    - Keeps more anti-detection flags for headless/CI runs.
-    """
+    """Perform login, handle External TOTP, return Kite access_token."""
     try:
         import pyotp
         from kiteconnect import KiteConnect
@@ -137,18 +214,14 @@ def login_and_get_token(api_key, api_secret, user_id, password, totp_secret, hea
         log.error("Install: pip install kiteconnect selenium pyotp webdriver-manager")
         sys.exit(6)
 
-    # On mac (local) prefer webdriver-manager to avoid driver mismatch issues.
     use_webdriver_manager = (sys.platform == "darwin")
-
     chrome_path, system_driver_path = find_chrome_and_driver()
 
-    # If using webdriver-manager, fetch a matching driver binary and point to it
     driver_path = system_driver_path
     if use_webdriver_manager:
         try:
             from webdriver_manager.chrome import ChromeDriverManager
-            driver_exe = ChromeDriverManager().install()
-            driver_path = driver_exe
+            driver_path = ChromeDriverManager().install()
             log.info("Using webdriver-manager chromedriver: %s", driver_path)
         except Exception as e:
             log.warning("webdriver-manager failed: %s; falling back to system chromedriver", e)
@@ -158,9 +231,7 @@ def login_and_get_token(api_key, api_secret, user_id, password, totp_secret, hea
         sys.exit(3)
 
     options = Options()
-    # If headless (CI): enable anti-detection and robust flags
     if headless:
-        # prefer new headless where available
         options.add_argument("--headless=new")
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
@@ -171,17 +242,13 @@ def login_and_get_token(api_key, api_secret, user_id, password, totp_secret, hea
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1280,800")
     else:
-        # Visible browser (local debug): keep options minimal to avoid macOS UI prompts/crashes
         options.add_argument("--start-maximized")
         options.add_argument("--window-size=1280,800")
-        # do NOT add incognito/automation-disable options that sometimes cause mac crashes
 
-    # Use explicit binary if found
     if chrome_path:
         options.binary_location = chrome_path
 
     service = Service(driver_path)
-    # Enable verbose logging from chromedriver when debugging
     service.log_path = os.environ.get("CHROMEDRIVER_LOG", "/tmp/chromedriver.log")
 
     driver = webdriver.Chrome(service=service, options=options)
@@ -200,7 +267,6 @@ def login_and_get_token(api_key, api_secret, user_id, password, totp_secret, hea
             driver.get(login_url)
             log.info("🔁 Attempt %d: loading login page", attempt)
 
-            # Try fresh login -> userid
             try:
                 user_input = wait.until(EC.presence_of_element_located((By.ID, "userid")))
                 user_input.clear()
@@ -209,14 +275,19 @@ def login_and_get_token(api_key, api_secret, user_id, password, totp_secret, hea
             except TimeoutException:
                 log.warning("⚠ userid not found (session-active or different markup).")
 
-            # password field (should be present)
             pwd_input = wait.until(EC.presence_of_element_located((By.ID, "password")))
             pwd_input.clear()
             pwd_input.send_keys(password)
-            driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]').click()
+            try:
+                submit_btn = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
+                submit_btn.click()
+            except Exception:
+                try:
+                    pwd_input.submit()
+                except Exception:
+                    driver.execute_script("document.querySelector('button[type=\\"submit\\"]').click();")
             log.info("🔒 Entered password and submitted")
 
-            # --- Wait for page fully loaded (helps with racey SPAs)
             for _ in range(6):
                 try:
                     ready = driver.execute_script("return document.readyState")
@@ -225,79 +296,74 @@ def login_and_get_token(api_key, api_secret, user_id, password, totp_secret, hea
                 except Exception:
                     pass
                 time.sleep(0.5)
-            
-            # pin (TOTP) page — robust approach
-            pin_input = None
+
             try:
-                pin_input = WebDriverWait(driver, 20).until(
-                    EC.element_to_be_clickable((By.ID, "pin"))
-                )
-            except TimeoutException:
-                log.warning("⚠ pin element not clickable by timeout; trying presence fallback")
-                try:
-                    pin_input = WebDriverWait(driver, 10).until(
-                        EC.presence_of_element_located((By.ID, "pin"))
-                    )
-                except TimeoutException:
-                    log.error("❌ TOTP input not found (presence fallback).")
-                    raise
-            
+                totp_input = _find_totp_input(driver, wait, timeout=20)
+            except Exception as e:
+                log.error("❌ TOTP input not found: %s", e)
+                raise
+
             pin_code = pyotp.TOTP(totp_secret).now()
-            
-            # Try normal interaction first
+            log.info("🔢 Generated TOTP (first 2 chars shown): %s", pin_code[:2] + "****")
+
             interacted = False
             try:
-                # ensure visible
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", pin_input)
-                pin_input.clear()
-                pin_input.send_keys(pin_code)
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", totp_input)
+                time.sleep(0.3)
+                totp_input.clear()
+                totp_input.send_keys(pin_code)
                 interacted = True
+                log.info("ℹ Entered TOTP via send_keys")
             except Exception as e:
-                log.warning("⚠ pin send_keys failed: %s", e)
-            
-            # If send_keys didn't work, set value via JS & dispatch events
+                log.warning("⚠ send_keys to TOTP input failed: %s", e)
+
             if not interacted:
                 try:
-                    log.info("ℹ Using JS to set TOTP value (fallback)")
+                    log.info("ℹ Using JS fallback to set TOTP field and dispatch events")
                     set_val_js = """
-                        var el = document.getElementById('pin');
-                        if (!el) { throw 'pin element missing'; }
+                        var el = arguments[0];
                         el.focus();
-                        el.value = arguments[0];
+                        el.value = arguments[1];
                         el.dispatchEvent(new Event('input', { bubbles: true }));
                         el.dispatchEvent(new Event('change', { bubbles: true }));
                         return true;
                     """
-                    driver.execute_script(set_val_js, pin_code)
+                    driver.execute_script(set_val_js, totp_input, pin_code)
                     interacted = True
                 except Exception as e:
-                    log.error("❌ JS fallback to set pin failed: %s", e)
+                    log.error("❌ JS fallback to set TOTP failed: %s", e)
                     raise
-            
-            # Submit — try normal click, fallback to JS click
+
+            clicked = False
             try:
-                btn = WebDriverWait(driver, 8).until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[type="submit"]')))
+                cont = None
                 try:
-                    btn.click()
+                    cont = WebDriverWait(driver, 6).until(
+                        EC.element_to_be_clickable((By.XPATH, "//button[normalize-space() = 'Continue']"))
+                    )
                 except Exception:
-                    driver.execute_script("arguments[0].click();", btn)
-            except TimeoutException:
-                # As last resort, fire form submit via JS
-                log.warning("⚠ submit button not clickable — trying form submit via JS")
-                try:
-                    driver.execute_script("""
-                        var b = document.querySelector('button[type="submit"]');
-                        if (b) { b.click(); } else {
-                            var f = document.querySelector('form');
-                            if (f) { f.submit(); }
-                        }
-                    """)
-                except Exception as e:
-                    log.error("❌ Could not submit form: %s", e)
-                    raise
-            
-            log.info("📟 Entered TOTP / submitted")
-            
+                    try:
+                        cont = WebDriverWait(driver, 6).until(
+                            EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
+                        )
+                    except Exception:
+                        cont = None
+
+                if cont:
+                    try:
+                        cont.click()
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", cont)
+                    clicked = True
+                    log.info("✅ Clicked Continue/Submit")
+                else:
+                    log.warning("⚠ Continue/Submit button not found; attempting form submit via JS")
+                    driver.execute_script("var b = document.querySelector('button[type=\\"submit\\"]'); if(b){ b.click(); } else { var f = document.querySelector('form'); if(f){ f.submit(); }}")
+                    clicked = True
+            except Exception as e:
+                log.warning("⚠ Continue click fallback failed: %s", e)
+
+            log.info("📟 Entered TOTP / submitted, waiting for redirect...")
             time.sleep(3)
             current_url = driver.current_url
             log.info("🔄 Redirected to %s", current_url)
@@ -311,13 +377,10 @@ def login_and_get_token(api_key, api_secret, user_id, password, totp_secret, hea
 
         except TimeoutException as te:
             log.warning("⏳ Timeout on attempt %d: %s", attempt, te)
-            # try again
             continue
         except Exception as e:
-            # If the browser died unexpectedly, capture chromedriver log (if any) to help debugging
             log.error("❌ Unexpected error on attempt %d: %s", attempt, e)
             try:
-                log.info("Collecting chromedriver debug log (if present):")
                 logpath = service.log_path
                 if os.path.exists(logpath):
                     with open(logpath, "r", errors="ignore") as fh:
@@ -352,45 +415,47 @@ def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", required=True, choices=["saras", "vs"])
-    parser.add_argument("--headless", action="store_true", default=False, help="force headless")
+    parser.add_argument("--headless", action="store_true", default=False)
     args = parser.parse_args()
 
     env = args.env.upper()
     repo = os.environ.get("REPO", "sugamkuchhal/trading_algo")
 
-    # load config (JSON first, fallback to individual env vars)
     cfg = load_env_config(env)
-    api_key = cfg.get("api_key") or os.environ.get(f"API_KEY_{env}")
+    api_key = cfg.get("api_key")
     api_secret = cfg.get("api_secret")
     user_id = cfg.get("user_id")
     password = cfg.get("password")
     totp_secret = cfg.get("totp_secret")
 
-    # validate
-    missing = [k for k, v in (("api_key", api_key), ("api_secret", api_secret),
-                              ("user_id", user_id), ("password", password),
-                              ("totp_secret", totp_secret)) if not v]
+    missing = [k for k, v in (("api_key", api_key), ("api_secret", api_secret), ("user_id", user_id), ("password", password), ("totp_secret", totp_secret)) if not v]
     if missing:
         log.error("Missing required credentials for %s: %s", env, missing)
         sys.exit(2)
 
-    # select headless behaviour:
-    # - If running in CI (CI=true) or user passed --headless, run headless.
     headless_env = os.environ.get("CI", "").lower() in ("true", "1") or os.environ.get("HEADLESS", "").lower() in ("true", "1")
     headless = args.headless or headless_env
 
-    gh_pat = os.environ.get(f"ACCESS_TOKEN_GH_PAT_{env}")
-    if not gh_pat:
-        log.error("Missing PAT: ACCESS_TOKEN_GH_PAT_%s", env)
-        sys.exit(2)
-
-    secret_name = f"ACCESS_TOKEN_{env}"
+    gh_pat_env_name = f"ACCESS_TOKEN_GH_PAT_{env}"
 
     access_token = login_and_get_token(api_key, api_secret, user_id, password, totp_secret, headless=headless)
 
-    # update GitHub secret with the PAT provided
-    gh_update_secret(secret_name, access_token, repo, gh_pat)
-    log.info("All done for %s", env)
+    # Save locally (mac Keychain preferred, plus file backup)
+    keychain_ok = save_to_keychain(env, access_token)
+    file_ok = save_to_local_file(env, access_token)
+
+    # Update GitHub secret if possible (best effort)
+    gh_ok = gh_update_secret(f"ACCESS_TOKEN_{env}", access_token, repo, gh_pat_env_name)
+
+    if not (keychain_ok or file_ok):
+        log.warning("⚠ Token was not saved locally")
+    if not gh_ok:
+        log.warning("⚠ Token was not updated in GitHub secrets")
+
+    if keychain_ok or file_ok or gh_ok:
+        log.info("All storage attempts finished.")
+    else:
+        log.error("No storage succeeded; please check logs and environment variables.")
 
 
 if __name__ == "__main__":
