@@ -2,8 +2,7 @@ name: refresh-tokens
 
 on:
   schedule:
-    # canonical refresh cron (UTC)
-    - cron: "0 19 * * 0-4"
+    - cron: "0 19 * * 0-4"   # UTC: weekly Mon-Fri at 19:00 UTC (adjust if needed)
   workflow_dispatch: {}
 
 permissions:
@@ -22,10 +21,7 @@ jobs:
       SMTP_USER: sugamkuchhal@gmail.com
       SMTP_TOKEN_JSON_COMMON: ${{ secrets.SMTP_TOKEN_JSON_COMMON }}
 
-      # SARAS creds
       ACCESS_TOKEN_GH_PAT_SARAS: ${{ secrets.ACCESS_TOKEN_GH_PAT_SARAS }}
-
-      # VS creds
       ACCESS_TOKEN_GH_PAT_VS: ${{ secrets.ACCESS_TOKEN_GH_PAT_VS }}
 
     steps:
@@ -37,16 +33,35 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Install Google Chrome (stable)
-        uses: browser-actions/setup-chrome@v3
+      - name: Install Google Chrome (via browser-actions/setup-chrome)
+        # use the published setup-chrome action (v1 / latest). v3 is not published.
+        uses: browser-actions/setup-chrome@v1
         with:
           chrome-version: stable
+          install-chromedriver: "false"
+          install-dependencies: "true"
+
+      - name: Fallback: ensure google-chrome binary exists (apt)
+        if: failure() || always()
+        run: |
+          set -euo pipefail
+          # Check common chrome binary locations; if none, try apt (this will not error the job)
+          if ! command -v google-chrome-stable >/dev/null 2>&1 && ! command -v google-chrome >/dev/null 2>&1; then
+            echo "google-chrome binary not found — attempting apt install (best-effort)"
+            sudo apt-get update -y
+            sudo apt-get install -y wget gnupg
+            wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add - || true
+            sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list' || true
+            sudo apt-get update -y || true
+            sudo apt-get install -y google-chrome-stable || true
+          else
+            echo "google-chrome already present at $(command -v google-chrome-stable || command -v google-chrome)"
+          fi
 
       - name: Install Python dependencies
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          # installed packages include selenium and webdriver-manager to reduce chromedriver mismatch issues
           pip install kiteconnect selenium pyotp webdriver-manager
 
       - name: Verify chrome & chromedriver
@@ -54,19 +69,20 @@ jobs:
           set -euo pipefail
           echo "Which chrome binary:"
           command -v google-chrome-stable || command -v google-chrome || true
-          echo "Chrome version:"
-          google-chrome-stable --version || google-chrome --version || true
-          # chromedriver may come from package or webdriver-manager at runtime
+          echo "Chrome version (if available):"
+          (google-chrome-stable --version || google-chrome --version) || true
+          echo "Chromedriver (if on PATH):"
           command -v chromedriver || true
 
       - name: Refresh SARAS access token
         env:
           ACCESS_JSON_SARAS: ${{ secrets.ACCESS_JSON_SARAS }}
           ACCESS_TOKEN_GH_PAT_SARAS: ${{ secrets.ACCESS_TOKEN_GH_PAT_SARAS }}
-          # helpful override if some installs place chrome elsewhere (optional)
+          # helpful override if chrome binary is in a non-default path
           GOOGLE_CHROME_BIN: /usr/bin/google-chrome-stable
         run: |
           set -euo pipefail
+          echo "Running auto_login for saras..."
           python tools/auto_login.py --env saras
 
       - name: Refresh VS access token
@@ -76,12 +92,13 @@ jobs:
           GOOGLE_CHROME_BIN: /usr/bin/google-chrome-stable
         run: |
           set -euo pipefail
+          echo "Running auto_login for vs..."
           python tools/auto_login.py --env vs
 
-      - name: Confirm secrets updated
+      - name: Confirm secrets updated (list)
         env:
           GH_TOKEN: ${{ secrets.ACCESS_TOKEN_GH_PAT_SARAS }}
         run: |
           set -euo pipefail
-          echo "🔎 Checking updated ACCESS_TOKEN_* secrets:"
+          echo "Listing secrets (ACCESS_TOKEN_*) for repo (read-only):"
           gh secret list -R $REPO | grep ACCESS_TOKEN_ || true
