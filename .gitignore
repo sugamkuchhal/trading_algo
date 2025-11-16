@@ -152,3 +152,7 @@ artifacts/
 secrets.yml
 secrets.json
 
+
+# Ignore all local secrets
+.config/
+

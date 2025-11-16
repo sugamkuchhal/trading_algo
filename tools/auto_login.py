@@ -32,11 +32,34 @@ import subprocess
 from urllib.parse import urlparse, parse_qs
 from shutil import which
 
+# Ensure common third-party names are available at module level for helpers
+try:
+    import pyotp
+    from kiteconnect import KiteConnect
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException
+except Exception:
+    # missing third-party libs will be handled later with clearer messages
+    pass
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger("auto_login")
 
 
 def load_env_config(env: str) -> dict:
+    """
+    Load configuration for env from (in order of precedence):
+      1. ACCESS_JSON_<ENV> environment variable (JSON)
+      2. ~/.config/trading_algo/access_<env>.json local file (JSON)
+      3. Individual environment variables: API_KEY_<ENV>, API_SECRET_<ENV>, USER_ID_<ENV>, PASSWORD_<ENV>, TOTP_SECRET_<ENV>
+
+    Returns dict with keys: api_key, api_secret, user_id, password, totp_secret
+    """
     json_name = f"ACCESS_JSON_{env}"
     j = os.environ.get(json_name)
     if j:
@@ -52,6 +75,26 @@ def load_env_config(env: str) -> dict:
         except Exception as e:
             log.error("Failed to parse %s: %s", json_name, e)
             sys.exit(2)
+
+    # If env var not present, try local file fallback
+    cfg_file = os.path.expanduser(f"~/.config/trading_algo/access_{env.lower()}.json")
+    if os.path.exists(cfg_file):
+        try:
+            with open(cfg_file, "r") as fh:
+                cfg = json.load(fh)
+            log.info("🔒 Loaded local config file %s", cfg_file)
+            return {
+                "api_key": cfg.get("api_key") or os.environ.get(f"API_KEY_{env}"),
+                "api_secret": cfg.get("api_secret") or os.environ.get(f"API_SECRET_{env}"),
+                "user_id": cfg.get("user_id") or os.environ.get(f"USER_ID_{env}"),
+                "password": cfg.get("password") or os.environ.get(f"PASSWORD_{env}"),
+                "totp_secret": cfg.get("totp_secret") or os.environ.get(f"TOTP_SECRET_{env}"),
+            }
+        except Exception as e:
+            log.error("Failed to read local config %s: %s", cfg_file, e)
+            sys.exit(2)
+
+    # Fallback to individual env vars
     return {
         "api_key": os.environ.get(f"API_KEY_{env}"),
         "api_secret": os.environ.get(f"API_SECRET_{env}"),
