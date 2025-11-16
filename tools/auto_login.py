@@ -32,21 +32,6 @@ import subprocess
 from urllib.parse import urlparse, parse_qs
 from shutil import which
 
-# Third-party libs used at runtime.
-try:
-    import pyotp
-    from kiteconnect import KiteConnect
-    from selenium import webdriver
-    from selenium.webdriver.chrome.service import Service
-    from selenium.webdriver.chrome.options import Options
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-    from selenium.common.exceptions import TimeoutException
-except Exception:
-    # We will error later with clearer message if missing
-    pass
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger("auto_login")
 
@@ -85,6 +70,7 @@ def gh_update_secret(secret_name: str, secret_value: str, repo: str, gh_pat_env_
     cmd = ["gh", "secret", "set", secret_name, "--repo", repo, "--body", secret_value]
     env = os.environ.copy()
     if gh_pat:
+        # ensure gh sees the PAT as GH_TOKEN
         env["GH_TOKEN"] = gh_pat
     try:
         log.info("🔐 Updating secret %s in %s", secret_name, repo)
@@ -93,7 +79,8 @@ def gh_update_secret(secret_name: str, secret_value: str, repo: str, gh_pat_env_
             log.info("✅ Successfully updated secret %s", secret_name)
             return True
         else:
-            log.error("❌ Failed to update secret %s: %s", secret_name, r.stderr.strip())
+            stderr = (r.stderr or "").strip()
+            log.error("❌ Failed to update secret %s: %s", secret_name, stderr)
             return False
     except FileNotFoundError:
         log.error("❌ gh CLI not found in PATH. Install GitHub CLI or provide ACCESS_TOKEN_GH_PAT_<ENV> and GH_TOKEN env.")
@@ -130,13 +117,13 @@ def save_to_keychain(env: str, token: str) -> bool:
             return True
         else:
             # Sometimes add-generic-password fails if item exists; try 'delete' then add.
-            if "already exists" in r.stderr.lower():
+            if "already exists" in (r.stderr or "").lower():
                 subprocess.run(["security", "delete-generic-password", "-s", service], capture_output=True)
                 r2 = subprocess.run(cmd, capture_output=True, text=True)
                 if r2.returncode == 0:
                     log.info("✅ Saved access token to macOS Keychain as %s", service)
                     return True
-            log.error("❌ Keychain save failed: %s", r.stderr.strip())
+            log.error("❌ Keychain save failed: %s", (r.stderr or "").strip())
             return False
     except FileNotFoundError:
         log.error("❌ security CLI not found; cannot save to macOS Keychain")
@@ -163,12 +150,27 @@ def save_to_local_file(env: str, token: str) -> bool:
 
 
 def find_chrome_and_driver():
-    chrome = which("google-chrome-stable") or which("google-chrome")
-    driver = which("chromedriver")
+    # Try common chrome binary names / paths
+    chrome = which("google-chrome-stable") or which("google-chrome") or which("chromium-browser") or which("chromium")
+    # Common linux locations
+    if not chrome:
+        for p in ("/usr/bin/google-chrome-stable", "/usr/bin/google-chrome", "/usr/bin/chromium-browser", "/usr/bin/chromium"):
+            if os.path.exists(p):
+                chrome = p
+                break
+    # Try macOS path if darwin
     if not chrome and sys.platform == "darwin":
         mac_chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
         if os.path.exists(mac_chrome):
             chrome = mac_chrome
+
+    driver = which("chromedriver")
+    # Also check chromedriver in /usr/local/bin or common places
+    if not driver:
+        for p in ("/usr/local/bin/chromedriver", "/usr/bin/chromedriver", "/snap/bin/chromedriver"):
+            if os.path.exists(p):
+                driver = p
+                break
     return chrome, driver
 
 
@@ -214,8 +216,17 @@ def login_and_get_token(api_key, api_secret, user_id, password, totp_secret, hea
         log.error("Install: pip install kiteconnect selenium pyotp webdriver-manager")
         sys.exit(6)
 
-    use_webdriver_manager = (sys.platform == "darwin")
+    # Detect chrome / chromedriver presence
     chrome_path, system_driver_path = find_chrome_and_driver()
+
+    # Use webdriver-manager if:
+    # - on macOS (existing behavior), OR
+    # - chromedriver not found (very important for CI like GitHub Actions)
+    use_webdriver_manager = False
+    if sys.platform == "darwin":
+        use_webdriver_manager = True
+    if not system_driver_path:
+        use_webdriver_manager = True
 
     driver_path = system_driver_path
     if use_webdriver_manager:
@@ -224,15 +235,22 @@ def login_and_get_token(api_key, api_secret, user_id, password, totp_secret, hea
             driver_path = ChromeDriverManager().install()
             log.info("Using webdriver-manager chromedriver: %s", driver_path)
         except Exception as e:
-            log.warning("webdriver-manager failed: %s; falling back to system chromedriver", e)
+            log.warning("webdriver-manager failed: %s; falling back to system chromedriver if available", e)
+            # If system driver was not present and webdriver-manager failed, we will error later.
+            driver_path = system_driver_path
 
     if not chrome_path or not driver_path:
         log.error("chrome or chromedriver not found (chrome=%s driver=%s)", chrome_path, driver_path)
+        log.error("On CI, ensure google-chrome-stable is installed and chromedriver is available or webdriver-manager can download it.")
         sys.exit(3)
 
     options = Options()
     if headless:
-        options.add_argument("--headless=new")
+        # Use the new headless flag if available, fallback to --headless for older versions
+        try:
+            options.add_argument("--headless=new")
+        except Exception:
+            options.add_argument("--headless")
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
@@ -251,8 +269,8 @@ def login_and_get_token(api_key, api_secret, user_id, password, totp_secret, hea
     service = Service(driver_path)
     service.log_path = os.environ.get("CHROMEDRIVER_LOG", "/tmp/chromedriver.log")
 
-    driver = webdriver.Chrome(service=service, options=options)
-    wait = WebDriverWait(driver, 20)
+    driver = None
+    wait = None
 
     login_url = f"https://kite.zerodha.com/connect/login?api_key={api_key}&v=3"
     log.info("🌐 Opening %s", login_url)
@@ -264,6 +282,8 @@ def login_and_get_token(api_key, api_secret, user_id, password, totp_secret, hea
     while attempt < max_attempts and not request_token:
         attempt += 1
         try:
+            driver = webdriver.Chrome(service=service, options=options)
+            wait = WebDriverWait(driver, 20)
             driver.get(login_url)
             log.info("🔁 Attempt %d: loading login page", attempt)
 
@@ -304,6 +324,7 @@ def login_and_get_token(api_key, api_secret, user_id, password, totp_secret, hea
                 raise
 
             pin_code = pyotp.TOTP(totp_secret).now()
+            # Never print full OTP in logs; show only first 2 chars masked
             log.info("🔢 Generated TOTP (first 2 chars shown): %s", pin_code[:2] + "****")
 
             interacted = False
@@ -377,6 +398,15 @@ def login_and_get_token(api_key, api_secret, user_id, password, totp_secret, hea
 
         except TimeoutException as te:
             log.warning("⏳ Timeout on attempt %d: %s", attempt, te)
+            # capture chromedriver logs for debug
+            try:
+                logpath = service.log_path
+                if os.path.exists(logpath):
+                    with open(logpath, "r", errors="ignore") as fh:
+                        tail = fh.read()[-4000:]
+                        log.info("=== chromedriver tail ===\n%s\n=== end chromedriver tail ===", tail)
+            except Exception:
+                pass
             continue
         except Exception as e:
             log.error("❌ Unexpected error on attempt %d: %s", attempt, e)
@@ -390,19 +420,25 @@ def login_and_get_token(api_key, api_secret, user_id, password, totp_secret, hea
                 pass
             continue
         finally:
-            pass
-
-    try:
-        driver.quit()
-    except Exception:
-        pass
+            # Always try to quit the driver between attempts before re-creating it
+            try:
+                if driver:
+                    driver.quit()
+                    driver = None
+            except Exception:
+                pass
 
     if not request_token:
         log.error("❌ Could not obtain request_token after %d attempts", max_attempts)
         sys.exit(4)
 
+    # Exchange request_token for access token using KiteConnect
     kite = KiteConnect(api_key=api_key)
-    session_data = kite.generate_session(request_token, api_secret=api_secret)
+    try:
+        session_data = kite.generate_session(request_token, api_secret=api_secret)
+    except Exception as e:
+        log.error("❌ KiteConnect.generate_session failed: %s", e)
+        sys.exit(7)
     access_token = session_data.get("access_token")
     if not access_token:
         log.error("❌ KiteConnect did not return access_token: %s", session_data)
