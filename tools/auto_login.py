@@ -8,7 +8,7 @@ Single script that:
  - saves the token BOTH locally (macOS Keychain or file) AND updates GitHub repo secret (if credentials provided)
 
 Behavior (single code for both flows):
- - If running on macOS, token will be saved into macOS Keychain (preferred) and also to ~/.config/trading_algo/access_<env>.json (fallback).
+ - If running on macOS, token will be saved into macOS Keychain (preferred) and also to ~/.config/trading_algo/access_token_<env>.json (fallback).
  - If ACCESS_TOKEN_GH_PAT_<ENV> or GH_TOKEN is available the script will update the GitHub Actions secret ACCESS_TOKEN_<ENV> for the configured repo.
  - If GitHub update fails, the script will log the error but still keep the local copy.
 
@@ -17,8 +17,7 @@ Usage:
   python tools/auto_login.py --env vs
 
 Env variables:
- - API_KEY_<ENV>, API_SECRET_<ENV>, USER_ID_<ENV>, PASSWORD_<ENV>, TOTP_SECRET_<ENV>
- - ACCESS_JSON_<ENV> (optional JSON blob with those keys)
+ - ACCESS_JSON_<ENV> (optional JSON blob with keys api_key, api_secret, user_id, password, totp_secret)
  - ACCESS_TOKEN_GH_PAT_<ENV> (optional PAT used to update repo secret)
  - REPO (optional; default: sugamkuchhal/trading_algo)
 """
@@ -76,13 +75,13 @@ def load_env_config(env: str) -> dict:
             log.error("Failed to parse %s: %s", json_name, e)
             sys.exit(2)
 
-    # If env var not present, try local file fallback
+    # If env var not present, try local creds file fallback (NOTE: creds file name changed to avoid collision)
     cfg_file = os.path.expanduser(f"~/.config/trading_algo/access_{env.lower()}.json")
     if os.path.exists(cfg_file):
         try:
             with open(cfg_file, "r") as fh:
                 cfg = json.load(fh)
-            log.info("🔒 Loaded local config file %s", cfg_file)
+            log.info("🔒 Loaded local creds file %s", cfg_file)
             return {
                 "api_key": cfg.get("api_key") or os.environ.get(f"API_KEY_{env}"),
                 "api_secret": cfg.get("api_secret") or os.environ.get(f"API_SECRET_{env}"),
@@ -91,7 +90,7 @@ def load_env_config(env: str) -> dict:
                 "totp_secret": cfg.get("totp_secret") or os.environ.get(f"TOTP_SECRET_{env}"),
             }
         except Exception as e:
-            log.error("Failed to read local config %s: %s", cfg_file, e)
+            log.error("Failed to read local creds %s: %s", cfg_file, e)
             sys.exit(2)
 
     # Fallback to individual env vars
@@ -177,10 +176,10 @@ def save_to_keychain(env: str, token: str) -> bool:
 
 
 def save_to_local_file(env: str, token: str) -> bool:
-    """Save token to ~/.config/trading_algo/access_<env>.json with 600 perms. Returns True on success."""
+    """Save token to ~/.config/trading_algo/access_token_<env>.json with 600 perms. Returns True on success."""
     cfg_dir = os.path.expanduser("~/.config/trading_algo")
     os.makedirs(cfg_dir, exist_ok=True)
-    path = os.path.join(cfg_dir, f"access_{env.lower()}.json")
+    path = os.path.join(cfg_dir, f"access_token_{env.lower()}.json")
     try:
         with open(path, "w") as fh:
             json.dump({"access_token": token}, fh)
@@ -219,10 +218,10 @@ def find_chrome_and_driver():
 
 def _find_totp_input(driver, wait, timeout=15):
     candidates = [
+        (By.CSS_SELECTOR, "input[type='number']"),
         (By.XPATH, "//label[contains(text(),'External TOTP')]/following::input[1]"),
         (By.CSS_SELECTOR, "input[inputmode='numeric']"),
         (By.CSS_SELECTOR, "input[type='tel']"),
-        (By.CSS_SELECTOR, "input[type='number']"),
         (By.CSS_SELECTOR, "input[type='text'][maxlength='6']"),
         (By.XPATH, "//input[not(@type='hidden')][1]"),
     ]
