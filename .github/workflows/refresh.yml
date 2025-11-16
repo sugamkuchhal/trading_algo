@@ -57,6 +57,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
 
+      - name: Install chromedriver (apt)
+        run: |
+          sudo apt-get update
+          # Install chromium-chromedriver package which provides /usr/bin/chromedriver
+          sudo apt-get install -y chromium-chromedriver
+          # Ensure chromedriver is on PATH (symlink if package placed elsewhere)
+          if ! command -v chromedriver >/dev/null 2>&1; then
+            sudo ln -s /usr/lib/chromium-browser/chromedriver /usr/local/bin/chromedriver || true
+            sudo ln -s /usr/bin/chromedriver /usr/local/bin/chromedriver || true
+          fi
+
+
       - name: Refresh SARAS access token
         run: |
           set -euo pipefail
