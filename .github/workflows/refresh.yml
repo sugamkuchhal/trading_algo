@@ -23,19 +23,9 @@ jobs:
       SMTP_TOKEN_JSON_COMMON: ${{ secrets.SMTP_TOKEN_JSON_COMMON }}
 
       # SARAS creds
-      API_KEY_SARAS: ${{ secrets.API_KEY_SARAS }}
-      API_SECRET_SARAS: ${{ secrets.API_SECRET_SARAS }}
-      USER_ID_SARAS: ${{ secrets.USER_ID_SARAS }}
-      PASSWORD_SARAS: ${{ secrets.PASSWORD_SARAS }}
-      TOTP_SECRET_SARAS: ${{ secrets.TOTP_SECRET_SARAS }}
       ACCESS_TOKEN_GH_PAT_SARAS: ${{ secrets.ACCESS_TOKEN_GH_PAT_SARAS }}
 
       # VS creds
-      API_KEY_VS: ${{ secrets.API_KEY_VS }}
-      API_SECRET_VS: ${{ secrets.API_SECRET_VS }}
-      USER_ID_VS: ${{ secrets.USER_ID_VS }}
-      PASSWORD_VS: ${{ secrets.PASSWORD_VS }}
-      TOTP_SECRET_VS: ${{ secrets.TOTP_SECRET_VS }}
       ACCESS_TOKEN_GH_PAT_VS: ${{ secrets.ACCESS_TOKEN_GH_PAT_VS }}
 
     steps:
