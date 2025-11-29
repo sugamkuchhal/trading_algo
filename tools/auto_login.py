@@ -30,6 +30,8 @@ import logging
 import subprocess
 from urllib.parse import urlparse, parse_qs
 from shutil import which
+from typing import Optional
+
 
 # Ensure common third-party names are available at module level for helpers
 try:
@@ -501,6 +503,52 @@ def login_and_get_token(api_key, api_secret, user_id, password, totp_secret, hea
     log.info("✅ Access token obtained")
     return access_token
 
+def load_existing_token(env: str) -> Optional[str]:
+    """Try to load existing token from Keychain or file. Return token string or None."""
+    token = None
+
+    # --- 1. Try macOS Keychain ---
+    if sys.platform == "darwin":
+        service = f"trading_algo_ACCESS_TOKEN_{env}"
+        try:
+            cmd = ["security", "find-generic-password", "-s", service, "-w"]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode == 0:
+                token = r.stdout.strip()
+                if token:
+                    log.info("🔑 Loaded token from Keychain")
+                    return token
+        except Exception:
+            pass
+
+    # --- 2. Try local file ---
+    path = os.path.expanduser(f"~/.config/trading_algo/access_token_{env.lower()}.json")
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as fh:
+                data = json.load(fh)
+            token = data.get("access_token")
+            if token:
+                log.info("📁 Loaded token from local file: %s", path)
+                return token
+        except Exception:
+            pass
+
+    return None
+
+
+def is_token_valid(api_key: str, token: str) -> bool:
+    """Check if a token is valid by making one cheap API call to Kite."""
+    try:
+        kite = KiteConnect(api_key=api_key)
+        kite.set_access_token(token)
+        kite.profile()   # authenticated endpoint
+        return True
+    except Exception as e:
+        log.debug("Debug: token validation exception details:", exc_info=True)
+        log.info("❌ Stored token invalid or expired: %s", e)
+        return False
+
 
 def main():
     import argparse
@@ -529,7 +577,19 @@ def main():
 
     gh_pat_env_name = f"ACCESS_TOKEN_GH_PAT_{env}"
 
-    access_token = login_and_get_token(api_key, api_secret, user_id, password, totp_secret, headless=headless)
+
+    # === NEW: Try existing token before doing a full login ===
+    existing = load_existing_token(env)
+    if existing:
+        if is_token_valid(api_key, existing):
+            log.info("✅ Existing token is valid. Skipping login.")
+            access_token = existing
+        else:
+            log.info("🔁 Existing token is invalid. Performing full login...")
+            access_token = login_and_get_token(api_key, api_secret, user_id, password, totp_secret, headless=headless)
+    else:
+        log.info("ℹ️ No existing token found. Performing full login...")
+        access_token = login_and_get_token(api_key, api_secret, user_id, password, totp_secret, headless=headless)
 
     # Save locally (mac Keychain preferred, plus file backup)
     keychain_ok = save_to_keychain(env, access_token)
