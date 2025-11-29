@@ -2,51 +2,43 @@ name: refresh
 
 on:
   schedule:
-    - cron: "0 19 * * 0-4"   # UTC: weekly Mon-Fri at 19:00 UTC (adjust if needed)
+    - cron: "0 19 * * 0-4"   # weekly Mon-Fri at 19:00 UTC
   workflow_dispatch: {}
 
 permissions:
   contents: read
-  actions: write
-
-env:
-  REPO: sugamkuchhal/trading_algo
-  # any other repo-level envs you want
+  actions: read
+  secrets: write
 
 jobs:
   refresh:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+
     env:
       REPO: sugamkuchhal/trading_algo
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          # <<< MINIMAL FIX: python version was '3.1' which doesn't exist on Ubuntu 24.04
           python-version: "3.10"
           check-latest: false
 
+      - name: Create config dir
+        run: mkdir -p ~/.config/trading_algo
+
+      # ---------- SARAS ----------
       - name: Preload SARAS token
         run: |
-          mkdir -p ~/.config/trading_algo
-          echo '${{ secrets.ACCESS_TOKEN_SARAS_RAW }}' > ~/.config/trading_algo/access_token_saras.json
+          echo '${{ secrets.ACCESS_TOKEN_SARAS }}' > ~/.config/trading_algo/access_token_saras.json
           chmod 600 ~/.config/trading_algo/access_token_saras.json
 
-      - name: Install minimal deps (kiteconnect only) - SARAS
+      - name: Validate preloaded SARAS token
+        id: validate_saras
         run: |
-          python -m pip install --upgrade pip
-          pip install kiteconnect
-
-      - id: validate_saras
-        name: Validate preloaded SARAS token
-        run: |
-          # run the validator and write a standard output variable "valid"
           if python tools/ci_validate_token.py --env saras; then
             echo "valid=true" >> $GITHUB_OUTPUT
           else
@@ -54,36 +46,39 @@ jobs:
           fi
 
       - name: Install Google Chrome (only if SARAS validation failed)
-        if: steps.validate_saras.outputs.valid == 'false'
+        if: steps.validate_saras.outputs.valid != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
 
-      - name: Install Python dependencies (selenium + extras) - SARAS
-        if: steps.validate_saras.outputs.valid == 'false'
+      - name: Install minimal deps (kiteconnect only) - SARAS
         run: |
           python -m pip install --upgrade pip
-          pip install selenium pyotp webdriver-manager
+          python -m pip install kiteconnect
+
+      - name: Install Python dependencies (selenium + extras) - SARAS (only if SARAS validation failed)
+        if: steps.validate_saras.outputs.valid != 'true'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install selenium pyotp webdriver-manager
 
       - name: Refresh SARAS access token
-        if: steps.validate_saras.outputs.valid == 'false'
-        run: |
-          python tools/auto_login.py --env saras
+        run: python tools/auto_login.py --env saras
+        env:
+          ACCESS_JSON_SARAS: ${{ secrets.ACCESS_JSON_SARAS }}
+          ACCESS_TOKEN_GH_PAT_SARAS: ${{ secrets.ACCESS_TOKEN_GH_PAT_SARAS }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOOGLE_CHROME_BIN: /usr/bin/google-chrome-stable
 
-      # ---------- Repeat pattern for VS environment ----------
+      # ---------- VS ----------
       - name: Preload VS token
         run: |
-          mkdir -p ~/.config/trading_algo
-          echo '${{ secrets.ACCESS_TOKEN_VS_RAW }}' > ~/.config/trading_algo/access_token_vs.json
+          echo '${{ secrets.ACCESS_TOKEN_VS }}' > ~/.config/trading_algo/access_token_vs.json
           chmod 600 ~/.config/trading_algo/access_token_vs.json
 
-      - name: Install minimal deps (kiteconnect only) - VS
-        run: |
-          python -m pip install --upgrade pip
-          pip install kiteconnect
-
-      - id: validate_vs
-        name: Validate preloaded VS token
+      - name: Validate preloaded VS token
+        id: validate_vs
         run: |
           if python tools/ci_validate_token.py --env vs; then
             echo "valid=true" >> $GITHUB_OUTPUT
@@ -92,21 +87,30 @@ jobs:
           fi
 
       - name: Install Google Chrome (only if VS validation failed)
-        if: steps.validate_vs.outputs.valid == 'false'
+        if: steps.validate_vs.outputs.valid != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
 
-      - name: Install Python dependencies (selenium + extras) - VS
-        if: steps.validate_vs.outputs.valid == 'false'
+      - name: Install minimal deps (kiteconnect only) - VS
         run: |
           python -m pip install --upgrade pip
-          pip install selenium pyotp webdriver-manager
+          python -m pip install kiteconnect
+
+      - name: Install Python dependencies (selenium + extras) - VS (only if VS validation failed)
+        if: steps.validate_vs.outputs.valid != 'true'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install selenium pyotp webdriver-manager
 
       - name: Refresh VS access token
-        if: steps.validate_vs.outputs.valid == 'false'
-        run: |
-          python tools/auto_login.py --env vs
+        run: python tools/auto_login.py --env vs
+        env:
+          ACCESS_JSON_VS: ${{ secrets.ACCESS_JSON_VS }}
+          ACCESS_TOKEN_GH_PAT_VS: ${{ secrets.ACCESS_TOKEN_GH_PAT_VS }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOOGLE_CHROME_BIN: /usr/bin/google-chrome-stable
 
       - name: Confirm secrets updated
         run: |

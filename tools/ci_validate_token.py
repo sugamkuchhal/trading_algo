@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-ci_validate_token.py
+tools/ci_validate_token.py
 
-Validates whether an access token looks usable *based only on local info*.
+Exit codes:
+  0 -> token considered VALID
+  1 -> token considered INVALID (CI should install chrome + selenium and run full login)
 
-- If token file exists and contains a non-empty token → usually valid
-- If an expiry timestamp exists → must be in the future
-- If expiry is missing → treated as valid (non-strict mode)
-- Exits 0 for valid, 1 for invalid (CI uses this to skip Selenium/Chrome)
+Behavior:
+  - Looks for ~/.config/trading_algo/access_token_<env>.json
+  - Checks presence of token string.
+  - Attempts to parse common expiry fields; if present must be > now + 60s.
+  - If expiry is missing -> non-strict mode -> treat as VALID.
 """
 
 import argparse
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -29,37 +31,48 @@ def load_json(path: Path):
         print(f"[validator] ❌ Token file not found: {path}", flush=True)
         return None
     try:
-        return json.loads(path.read_text())
+        raw = path.read_text()
+        # some workflows echo strings with surrounding quotes; try to clean common wrappers
+        raw = raw.strip()
+        # if the secret is a bare token string rather than JSON, wrap it:
+        if raw and not (raw.startswith("{") and raw.endswith("}")):
+            # attempt to decode as plain token
+            return {"access_token": raw.strip('"').strip("'")}
+        return json.loads(raw)
     except Exception as e:
-        print(f"[validator] ❌ Failed to parse {path}: {e}", flush=True)
+        print(f"[validator] ❌ Failed to parse token file: {e}", flush=True)
         return None
 
 
 def extract_expiry(data: dict):
-    """
-    Try to interpret any common expiry fields.
-    Returns expiry_ts (int) or None if no usable expiry found.
-    """
     now = int(time.time())
-    possible_keys = ["expiry", "expires_at", "expiry_ts", "expires_at_ms", "expires_in"]
-
+    possible_keys = [
+        "expiry",
+        "expires_at",
+        "expiry_ts",
+        "expires_at_ms",
+        "expires_in",
+        "expires",
+        "exp",
+    ]
     for key in possible_keys:
         if key not in data:
             continue
-        val = data[key]
+        val = data.get(key)
         try:
+            if val is None:
+                continue
             if key == "expires_in":
                 return now + int(val)
             if key.endswith("_ms"):
-                return int(val) // 1000  # ms → seconds
+                return int(val) // 1000
             expiry = int(val)
-            # If the number is absurdly large (ms), convert
+            # if expiry looks like ms timestamp, convert
             if expiry > 10**12:
                 expiry //= 1000
             return expiry
-        except:
+        except Exception:
             continue
-
     return None
 
 
@@ -70,38 +83,34 @@ def main():
 
     data = load_json(path)
     if not data:
+        print("[validator] ❌ No token data loaded.", flush=True)
         sys.exit(1)
 
     token = (
         data.get("access_token")
         or data.get("token")
         or data.get("accessToken")
+        or data.get("token_value")
+        or data.get("value")
     )
 
     if not token or not isinstance(token, str) or not token.strip():
-        print(f"[validator] ❌ No valid token string found in {path}", flush=True)
+        print("[validator] ❌ No valid token string found.", flush=True)
         sys.exit(1)
 
     expiry_ts = extract_expiry(data)
     now = int(time.time())
 
     if expiry_ts is not None:
-        if expiry_ts <= now + 60:  # treat <60s remaining as expired
-            print(
-                f"[validator] ❌ Token expired or near expiry "
-                f"(expiry={expiry_ts}, now={now})",
-                flush=True,
-            )
+        if expiry_ts <= now + 60:
+            print(f"[validator] ❌ Token expired or near-expiry (expiry={expiry_ts}, now={now}).", flush=True)
             sys.exit(1)
         else:
-            print(
-                f"[validator] ✅ Token valid (expiry={expiry_ts}, now={now})",
-                flush=True,
-            )
+            print(f"[validator] ✅ Token valid (expiry={expiry_ts}, now={now}).", flush=True)
             sys.exit(0)
 
-    # No expiry present → assume valid (matches your current system)
-    print("[validator] ⚠️ No expiry info. Treating token as VALID.", flush=True)
+    # No expiry present -> non-strict mode -> treat as valid
+    print("[validator] ⚠️ No expiry info present. Treating token as VALID (non-strict).", flush=True)
     sys.exit(0)
 
 
