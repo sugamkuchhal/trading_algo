@@ -7,8 +7,7 @@ on:
 
 permissions:
   contents: read
-  actions: read
-  secrets: write
+  actions: write
 
 jobs:
   refresh:
