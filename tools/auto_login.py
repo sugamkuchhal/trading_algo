@@ -63,6 +63,19 @@ def load_env_config(env: str) -> dict:
     j = os.environ.get(json_name)
     if j:
         try:
+            # Accept either raw JSON or base64-encoded JSON.
+            # If user stored the JSON as base64 (recommended for multiline secrets),
+            # try to decode it first; if not base64, fall back to raw value.
+            try:
+                import base64
+                decoded = base64.b64decode(j).decode("utf-8")
+                # If decoded looks like JSON (starts with { or [), use it.
+                if decoded.strip().startswith(("{", "[")):
+                    j = decoded
+            except Exception:
+                # not base64, proceed with original string
+                pass
+
             cfg = json.loads(j)
             return {
                 "api_key": cfg.get("api_key") or os.environ.get(f"API_KEY_{env}"),

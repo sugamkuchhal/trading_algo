@@ -7,7 +7,7 @@ on:
 
 permissions:
   contents: read
-  actions: read
+  actions: write
 
 jobs:
   refresh:
@@ -52,6 +52,7 @@ jobs:
         env:
           ACCESS_JSON_SARAS: ${{ secrets.ACCESS_JSON_SARAS }}
           ACCESS_TOKEN_GH_PAT_SARAS: ${{ secrets.ACCESS_TOKEN_GH_PAT_SARAS }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GOOGLE_CHROME_BIN: /usr/bin/google-chrome-stable
         run: |
           python tools/auto_login.py --env saras
@@ -60,6 +61,7 @@ jobs:
         env:
           ACCESS_JSON_VS: ${{ secrets.ACCESS_JSON_VS }}
           ACCESS_TOKEN_GH_PAT_VS: ${{ secrets.ACCESS_TOKEN_GH_PAT_VS }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GOOGLE_CHROME_BIN: /usr/bin/google-chrome-stable
         run: |
           python tools/auto_login.py --env vs
