@@ -49,20 +49,24 @@ jobs:
           google-chrome-stable --version
 
       - name: Refresh SARAS access token
+      env:
+        GH_TOKEN: ${{ secrets.ACCESS_TOKEN_GH_PAT_SARAS }}
         env:
           ACCESS_JSON_SARAS: ${{ secrets.ACCESS_JSON_SARAS }}
           ACCESS_TOKEN_GH_PAT_SARAS: ${{ secrets.ACCESS_TOKEN_GH_PAT_SARAS }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.ACCESS_TOKEN_GH_PAT_SARAS }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GOOGLE_CHROME_BIN: /usr/bin/google-chrome-stable
         run: |
           python tools/auto_login.py --env saras
 
       - name: Refresh VS access token
+      env:
+        GH_TOKEN: ${{ secrets.ACCESS_TOKEN_GH_PAT_VS }}
         env:
           ACCESS_JSON_VS: ${{ secrets.ACCESS_JSON_VS }}
           ACCESS_TOKEN_GH_PAT_VS: ${{ secrets.ACCESS_TOKEN_GH_PAT_VS }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.ACCESS_TOKEN_GH_PAT_VS }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GOOGLE_CHROME_BIN: /usr/bin/google-chrome-stable
         run: |
