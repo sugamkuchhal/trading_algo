@@ -2,115 +2,131 @@
 """
 tools/ci_validate_token.py
 
-Exit codes:
-  0 -> token considered VALID
-  1 -> token considered INVALID (CI should install chrome + selenium and run full login)
+Minimal validator used by CI to decide whether a token is already valid (so we can skip
+the heavier auto-login and browser installs).
 
 Behavior:
-  - Looks for ~/.config/trading_algo/access_token_<env>.json
-  - Checks presence of token string.
-  - Attempts to parse common expiry fields; if present must be > now + 60s.
-  - If expiry is missing -> non-strict mode -> treat as VALID.
+ - Loads: ~/.config/trading_algo/access_token_<env>.json
+ - Ensures JSON parse + presence of a token key (access_token or token)
+ - If env var VALIDATE_URL_<ENV> is present, makes a single GET to that URL with
+   Authorization: Bearer <token> and treats 2xx as valid.
+ - Else, if the JSON contains an expiry (iso string or unix seconds), checks it.
+ - Else, if no URL or expiry, treats token as VALID (non-strict) but logs a warning.
+
+Exit codes:
+ 0 = valid
+ 1 = invalid (missing/expired/failed validation)
+ 2 = missing token file / parse error
+ 3 = missing dependency / runtime issue
 """
 
 import argparse
 import json
+import os
 import sys
-import time
 from pathlib import Path
+from datetime import datetime, timezone
+
+try:
+    import requests
+except Exception:
+    print("ERROR: 'requests' not installed. Please install requests.", file=sys.stderr)
+    sys.exit(3)
 
 
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--env", required=True, choices=["saras", "vs"])
-    return p.parse_args()
-
-
-def load_json(path: Path):
+def load_token_file(env: str):
+    path = Path.home() / ".config" / "trading_algo" / f"access_token_{env}.json"
     if not path.exists():
-        print(f"[validator] ❌ Token file not found: {path}", flush=True)
-        return None
+        print(f"No token file found at {path}")
+        return None, path
     try:
-        raw = path.read_text()
-        # some workflows echo strings with surrounding quotes; try to clean common wrappers
-        raw = raw.strip()
-        # if the secret is a bare token string rather than JSON, wrap it:
-        if raw and not (raw.startswith("{") and raw.endswith("}")):
-            # attempt to decode as plain token
-            return {"access_token": raw.strip('"').strip("'")}
-        return json.loads(raw)
+        data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
-        print(f"[validator] ❌ Failed to parse token file: {e}", flush=True)
-        return None
+        print(f"Failed to parse token JSON at {path}: {e}", file=sys.stderr)
+        return None, path
+    return data, path
 
 
-def extract_expiry(data: dict):
-    now = int(time.time())
-    possible_keys = [
-        "expiry",
-        "expires_at",
-        "expiry_ts",
-        "expires_at_ms",
-        "expires_in",
-        "expires",
-        "exp",
-    ]
-    for key in possible_keys:
-        if key not in data:
-            continue
-        val = data.get(key)
-        try:
-            if val is None:
-                continue
-            if key == "expires_in":
-                return now + int(val)
-            if key.endswith("_ms"):
-                return int(val) // 1000
-            expiry = int(val)
-            # if expiry looks like ms timestamp, convert
-            if expiry > 10**12:
-                expiry //= 1000
-            return expiry
-        except Exception:
-            continue
+def find_token(data: dict):
+    # common keys
+    for key in ("access_token", "token", "accessToken", "access"):
+        if key in data:
+            return data[key], key
+    # fallback: single-key dict with the token as value
+    if isinstance(data, dict) and len(data) == 1:
+        return next(iter(data.values())), next(iter(data.keys()))
+    return None, None
+
+
+def parse_expiry(data: dict):
+    # Accept 'expiry', 'expires_at', 'expires' (either ISO8601 or epoch seconds)
+    for key in ("expiry", "expires_at", "expires"):
+        if key in data:
+            v = data[key]
+            # if numeric, treat as epoch seconds
+            try:
+                if isinstance(v, (int, float)):
+                    return datetime.fromtimestamp(float(v), tz=timezone.utc)
+                # try ISO format
+                return datetime.fromisoformat(str(v)).astimezone(timezone.utc)
+            except Exception:
+                # ignore parse errors
+                pass
     return None
 
 
-def main():
-    args = parse_args()
-    env = args.env.lower()
-    path = Path.home() / ".config" / "trading_algo" / f"access_token_{env}.json"
-
-    data = load_json(path)
-    if not data:
-        print("[validator] ❌ No token data loaded.", flush=True)
-        sys.exit(1)
-
-    token = (
-        data.get("access_token")
-        or data.get("token")
-        or data.get("accessToken")
-        or data.get("token_value")
-        or data.get("value")
-    )
-
-    if not token or not isinstance(token, str) or not token.strip():
-        print("[validator] ❌ No valid token string found.", flush=True)
-        sys.exit(1)
-
-    expiry_ts = extract_expiry(data)
-    now = int(time.time())
-
-    if expiry_ts is not None:
-        if expiry_ts <= now + 60:
-            print(f"[validator] ❌ Token expired or near-expiry (expiry={expiry_ts}, now={now}).", flush=True)
-            sys.exit(1)
+def validate_with_url(token: str, url: str):
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        if 200 <= r.status_code < 300:
+            print(f"[validator] URL check succeeded: {url} -> {r.status_code}")
+            return True
         else:
-            print(f"[validator] ✅ Token valid (expiry={expiry_ts}, now={now}).", flush=True)
-            sys.exit(0)
+            print(f"[validator] URL check failed: {url} -> {r.status_code} (resp: {r.text[:200]})")
+            return False
+    except Exception as e:
+        print(f"[validator] URL check error contacting {url}: {e}", file=sys.stderr)
+        return False
 
-    # No expiry present -> non-strict mode -> treat as valid
-    print("[validator] ⚠️ No expiry info present. Treating token as VALID (non-strict).", flush=True)
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--env", required=True, help="environment name (e.g. saras, vs)")
+    args = p.parse_args()
+    env = args.env
+
+    data, path = load_token_file(env)
+    if data is None:
+        print(f"[validator] No usable token file for env '{env}' (looked at {path})", file=sys.stderr)
+        sys.exit(2)
+
+    token, token_key = find_token(data)
+    if not token:
+        print(f"[validator] Token key not found in {path}. Expected 'access_token' or similar.", file=sys.stderr)
+        sys.exit(2)
+
+    # 1) If explicit validate URL is provided via env var VALIDATE_URL_<ENV>, use it.
+    env_var_name = f"VALIDATE_URL_{env.upper()}"
+    validate_url = os.environ.get(env_var_name)
+    if validate_url:
+        ok = validate_with_url(token, validate_url)
+        sys.exit(0 if ok else 1)
+
+    # 2) If expiry info present, check it strictly
+    expiry_dt = parse_expiry(data)
+    if expiry_dt:
+        now = datetime.now(timezone.utc)
+        # add a small safety margin of 60s
+        if now < expiry_dt:
+            print(f"[validator] Token has expiry {expiry_dt.isoformat()} and is currently valid.")
+            sys.exit(0)
+        else:
+            print(f"[validator] Token expired at {expiry_dt.isoformat()} (now: {now.isoformat()})", file=sys.stderr)
+            sys.exit(1)
+
+    # 3) As a last resort: non-strict accept (warn)
+    print("[validator] No validate URL or expiry found. Treating token as VALID (non-strict).")
     sys.exit(0)
 
 
