@@ -24,30 +24,24 @@ jobs:
         with:
           python-version: "3.10"
 
-      # -------------------- SARAS flow --------------------
+      - name: Install Google Chrome (only if SARAS validation failed)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+
+      - name: Install Python dependencies (selenium + extras) - SARAS
+        run: |
+          python -m pip install --upgrade pip
+          pip install selenium pyotp webdriver-manager kiteconnect
+
+      # -------------------- SARAS flow ------------------
+
       - name: Preload SARAS token
         run: |
           mkdir -p ~/.config/trading_algo
           echo '{"access_token":"'"${{ secrets.ACCESS_TOKEN_SARAS }}"'"}' \
             > ~/.config/trading_algo/access_token_saras.json
           chmod 600 ~/.config/trading_algo/access_token_saras.json
-
-      - name: Install minimal deps (kiteconnect only) - SARAS
-        run: |
-          python -m pip install --upgrade pip
-          pip install kiteconnect
-
-      - name: Install Google Chrome (only if SARAS validation failed)
-        if: steps.validate-saras.outputs.valid != 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
-
-      - name: Install Python dependencies (selenium + extras) - SARAS
-        if: steps.validate-saras.outputs.valid != 'true'
-        run: |
-          python -m pip install --upgrade pip
-          pip install selenium pyotp webdriver-manager
 
       - name: Refresh SARAS access token
         env:
@@ -59,30 +53,14 @@ jobs:
         run: |
           python tools/auto_login.py --env saras
 
-      # -------------------- VS flow --------------------
+      # -------------------- VS flow ---------------------
+
       - name: Preload VS token
         run: |
           mkdir -p ~/.config/trading_algo
           echo '{"access_token":"'"${{ secrets.ACCESS_TOKEN_VS }}"'"}' \
             > ~/.config/trading_algo/access_token_vs.json
           chmod 600 ~/.config/trading_algo/access_token_vs.json
-
-      - name: Install minimal deps (kiteconnect only) - VS
-        run: |
-          python -m pip install --upgrade pip
-          pip install kiteconnect
-
-      - name: Install Google Chrome (only if VS validation failed)
-        if: steps.validate-vs.outputs.valid != 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
-
-      - name: Install Python dependencies (selenium + extras) - VS
-        if: steps.validate-vs.outputs.valid != 'true'
-        run: |
-          python -m pip install --upgrade pip
-          pip install selenium pyotp webdriver-manager
 
       - name: Refresh VS access token
         env:
@@ -94,10 +72,10 @@ jobs:
         run: |
           python tools/auto_login.py --env vs
 
+      # -------------------- UPDATE flow -----------------
+
       - name: Confirm secrets updated
         env:
           GH_TOKEN: ${{ secrets.ACCESS_TOKEN_GH_PAT_SARAS }}
         run: |
           gh secret list -R $REPO | grep ACCESS_TOKEN_ || true
-
-
