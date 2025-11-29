@@ -1,8 +1,8 @@
-name: refresh
+name: refresh-tokens
 
 on:
   schedule:
-    - cron: "0 19 * * 0-4"   # weekly Mon-Fri at 19:00 UTC
+    - cron: "0 19 * * 0-4"
   workflow_dispatch: {}
 
 permissions:
@@ -11,42 +11,34 @@ permissions:
 
 jobs:
   refresh:
-    runs-on: ubuntu-24.04
-
+    runs-on: ubuntu-latest
     env:
       REPO: sugamkuchhal/trading_algo
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10'    # supported version
+          python-version: "3.10"
 
-      - name: Create config dir (CI preload location)
-        run: mkdir -p ~/.config/trading_algo
-
-      - name: Preload SARAS token (if secret present)
+      # -------------------- SARAS flow --------------------
+      - name: Preload SARAS token
         run: |
-          if [ -n "${{ secrets.ACCESS_TOKEN_SARAS }}" ]; then
-            echo "${{ secrets.ACCESS_TOKEN_SARAS }}" > ~/.config/trading_algo/access_token_saras.json
-            chmod 600 ~/.config/trading_algo/access_token_saras.json
-            echo "Preloaded ACCESS_TOKEN_SARAS"
-          else
-            echo "No ACCESS_TOKEN_SARAS secret; skipping preload"
-          fi
+          mkdir -p ~/.config/trading_algo
+          echo '{"access_token":"'"${{ secrets.ACCESS_TOKEN_SARAS }}"'"}' \
+            > ~/.config/trading_algo/access_token_saras.json
+          chmod 600 ~/.config/trading_algo/access_token_saras.json
 
-      - name: Install minimal deps for validator
+      - name: Install minimal deps (kiteconnect only) - SARAS
         run: |
           python -m pip install --upgrade pip
-          python -m pip install requests
+          pip install kiteconnect
 
       - name: Validate preloaded SARAS token
-        id: validate_saras
+        id: validate-saras
         run: |
           if python tools/ci_validate_token.py --env saras; then
             echo "valid=true" >> $GITHUB_OUTPUT
@@ -54,31 +46,43 @@ jobs:
             echo "valid=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: If SARAS invalid install browser deps
-        if: steps.validate_saras.outputs.valid == 'false'
+      - name: Install Google Chrome (only if SARAS validation failed)
+        if: steps.validate-saras.outputs.valid != 'true'
         run: |
-          python -m pip install selenium pyotp webdriver-manager kiteconnect
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
 
-      - name: If SARAS invalid run auto-login
-        if: steps.validate_saras.outputs.valid == 'false'
-        run: python tools/auto_login.py --env saras
-
-      - name: Confirm secrets updated (SARAS)
+      - name: Install Python dependencies (selenium + extras) - SARAS
+        if: steps.validate-saras.outputs.valid != 'true'
         run: |
-          gh secret list -R $REPO | grep ACCESS_TOKEN_ || true
+          python -m pip install --upgrade pip
+          pip install selenium pyotp webdriver-manager
 
-      - name: Preload VS token (if secret present)
+      - name: Refresh SARAS access token
+        env:
+          ACCESS_JSON_SARAS: ${{ secrets.ACCESS_JSON_SARAS }}
+          ACCESS_TOKEN_GH_PAT_SARAS: ${{ secrets.ACCESS_TOKEN_GH_PAT_SARAS }}
+          GH_TOKEN: ${{ secrets.ACCESS_TOKEN_GH_PAT_SARAS }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOOGLE_CHROME_BIN: /usr/bin/google-chrome-stable
         run: |
-          if [ -n "${{ secrets.ACCESS_TOKEN_VS }}" ]; then
-            echo "${{ secrets.ACCESS_TOKEN_VS }}" > ~/.config/trading_algo/access_token_vs.json
-            chmod 600 ~/.config/trading_algo/access_token_vs.json
-            echo "Preloaded ACCESS_TOKEN_VS"
-          else
-            echo "No ACCESS_TOKEN_VS secret; skipping preload"
-          fi
+          python tools/auto_login.py --env saras
+
+      # -------------------- VS flow --------------------
+      - name: Preload VS token
+        run: |
+          mkdir -p ~/.config/trading_algo
+          echo '{"access_token":"'"${{ secrets.ACCESS_TOKEN_VS }}"'"}' \
+            > ~/.config/trading_algo/access_token_vs.json
+          chmod 600 ~/.config/trading_algo/access_token_vs.json
+
+      - name: Install minimal deps (kiteconnect only) - VS
+        run: |
+          python -m pip install --upgrade pip
+          pip install kiteconnect
 
       - name: Validate preloaded VS token
-        id: validate_vs
+        id: validate-vs
         run: |
           if python tools/ci_validate_token.py --env vs; then
             echo "valid=true" >> $GITHUB_OUTPUT
@@ -86,16 +90,32 @@ jobs:
             echo "valid=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: If VS invalid install browser deps
-        if: steps.validate_vs.outputs.valid == 'false'
+      - name: Install Google Chrome (only if VS validation failed)
+        if: steps.validate-vs.outputs.valid != 'true'
         run: |
-          python -m pip install selenium pyotp webdriver-manager kiteconnect
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
 
-      - name: If VS invalid run auto-login
-        if: steps.validate_vs.outputs.valid == 'false'
-        run: python tools/auto_login.py --env vs
+      - name: Install Python dependencies (selenium + extras) - VS
+        if: steps.validate-vs.outputs.valid != 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install selenium pyotp webdriver-manager
 
-      - name: Confirm secrets updated (final)
+      - name: Refresh VS access token
+        env:
+          ACCESS_JSON_VS: ${{ secrets.ACCESS_JSON_VS }}
+          ACCESS_TOKEN_GH_PAT_VS: ${{ secrets.ACCESS_TOKEN_GH_PAT_VS }}
+          GH_TOKEN: ${{ secrets.ACCESS_TOKEN_GH_PAT_VS }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOOGLE_CHROME_BIN: /usr/bin/google-chrome-stable
+        run: |
+          python tools/auto_login.py --env vs
+
+      - name: Confirm secrets updated
+        env:
+          GH_TOKEN: ${{ secrets.ACCESS_TOKEN_GH_PAT_SARAS }}
         run: |
           gh secret list -R $REPO | grep ACCESS_TOKEN_ || true
+
 
