@@ -6,8 +6,7 @@ on:
 
 permissions:
   contents: read
-  actions: read
-  secrets: write    # needed to update repo secrets
+  actions: write
 
 env:
   REPO: sugamkuchhal/trading_algo
