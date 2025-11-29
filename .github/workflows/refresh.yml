@@ -37,15 +37,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install kiteconnect
 
-      - name: Validate preloaded SARAS token
-        id: validate-saras
-        run: |
-          if python tools/ci_validate_token.py --env saras; then
-            echo "valid=true" >> $GITHUB_OUTPUT
-          else
-            echo "valid=false" >> $GITHUB_OUTPUT
-          fi
-
       - name: Install Google Chrome (only if SARAS validation failed)
         if: steps.validate-saras.outputs.valid != 'true'
         run: |
@@ -80,15 +71,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install kiteconnect
-
-      - name: Validate preloaded VS token
-        id: validate-vs
-        run: |
-          if python tools/ci_validate_token.py --env vs; then
-            echo "valid=true" >> $GITHUB_OUTPUT
-          else
-            echo "valid=false" >> $GITHUB_OUTPUT
-          fi
 
       - name: Install Google Chrome (only if VS validation failed)
         if: steps.validate-vs.outputs.valid != 'true'
