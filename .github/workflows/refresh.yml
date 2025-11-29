@@ -25,19 +25,20 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10'    # use a supported version
+          python-version: '3.10'    # supported version
 
       - name: Create config dir (CI preload location)
-        run: |
-          mkdir -p ~/.config/trading_algo
+        run: mkdir -p ~/.config/trading_algo
 
-      # PRELOAD: write provided access token JSON into config (so validator can read it)
-      # Expected secrets: ACCESS_TOKEN_<ENV> (raw JSON string for each env)
-      - name: Preload SARAS token
-        if: ${{ secrets.ACCESS_TOKEN_SARAS != '' }}
+      - name: Preload SARAS token (if secret present)
         run: |
-          echo "${{ secrets.ACCESS_TOKEN_SARAS }}" > ~/.config/trading_algo/access_token_saras.json
-          chmod 600 ~/.config/trading_algo/access_token_saras.json
+          if [ -n "${{ secrets.ACCESS_TOKEN_SARAS }}" ]; then
+            echo "${{ secrets.ACCESS_TOKEN_SARAS }}" > ~/.config/trading_algo/access_token_saras.json
+            chmod 600 ~/.config/trading_algo/access_token_saras.json
+            echo "Preloaded ACCESS_TOKEN_SARAS"
+          else
+            echo "No ACCESS_TOKEN_SARAS secret; skipping preload"
+          fi
 
       - name: Install minimal deps for validator
         run: |
@@ -53,28 +54,28 @@ jobs:
             echo "valid=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: If SARAS invalid install browser deps
+      - name: If SARAS invalid: install browser deps
         if: steps.validate_saras.outputs.valid == 'false'
         run: |
-          # install only when login is required
           python -m pip install selenium pyotp webdriver-manager kiteconnect
 
-      - name: If SARAS invalid run auto-login
+      - name: If SARAS invalid: run auto-login
         if: steps.validate_saras.outputs.valid == 'false'
-        run: |
-          python tools/auto_login.py --env saras
+        run: python tools/auto_login.py --env saras
 
-      - name: Confirm/update secrets (SARAS)
-        if: always()  # show what's currently present in GH Secrets (timestamps), helpful for logs
+      - name: Confirm secrets updated (SARAS)
         run: |
           gh secret list -R $REPO | grep ACCESS_TOKEN_ || true
 
-      # Repeat for VS environment (same flow)
-      - name: Preload VS token
-        if: ${{ secrets.ACCESS_TOKEN_VS != '' }}
+      - name: Preload VS token (if secret present)
         run: |
-          echo "${{ secrets.ACCESS_TOKEN_VS }}" > ~/.config/trading_algo/access_token_vs.json
-          chmod 600 ~/.config/trading_algo/access_token_vs.json
+          if [ -n "${{ secrets.ACCESS_TOKEN_VS }}" ]; then
+            echo "${{ secrets.ACCESS_TOKEN_VS }}" > ~/.config/trading_algo/access_token_vs.json
+            chmod 600 ~/.config/trading_algo/access_token_vs.json
+            echo "Preloaded ACCESS_TOKEN_VS"
+          else
+            echo "No ACCESS_TOKEN_VS secret; skipping preload"
+          fi
 
       - name: Validate preloaded VS token
         id: validate_vs
@@ -85,15 +86,14 @@ jobs:
             echo "valid=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: If VS invalid install browser deps
+      - name: If VS invalid: install browser deps
         if: steps.validate_vs.outputs.valid == 'false'
         run: |
           python -m pip install selenium pyotp webdriver-manager kiteconnect
 
-      - name: If VS invalid run auto-login
+      - name: If VS invalid: run auto-login
         if: steps.validate_vs.outputs.valid == 'false'
-        run: |
-          python tools/auto_login.py --env vs
+        run: python tools/auto_login.py --env vs
 
       - name: Confirm secrets updated (final)
         run: |
