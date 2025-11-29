@@ -1,0 +1,14 @@
+{
+  "COMMON": {
+    "MASTER": { "spreadsheet_ids": ["143py3t5oTsz0gAfp8VpSJlpR5VS8Z4tfl067pMtW1EE"] },
+    "FEED":   { "spreadsheet_ids": ["1ayv2CiY078ZaZHVl2LIQNNcedEuOC56bR1fL6JMBQaM"] }
+  },
+  "SARAS": {
+    "PORTFOLIO": { "spreadsheet_ids": ["14G8Yinl28F9ZROedyhiH4p5jCz2bcfA2goVB21PVE1s"] },
+    "SGST":      { "spreadsheet_ids": ["1Zg0kKrySRcEko8FhPeFU_Dcr7giCmzxdkpVqgx1lhFM"] }
+  },
+  "VS": {
+    "PORTFOLIO": { "spreadsheet_ids": ["145TqrpQ3Twx6Tezh28s5GnbowlBb_qcY5UM1RvfIclI"] },
+    "SGST":      { "spreadsheet_ids": ["1cqNPyrhhj8rTElu3Ee9XFIQVDzebTBSYFaHFeixA4js"] }
+  }
+}
