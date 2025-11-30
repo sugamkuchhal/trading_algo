@@ -1,4 +1,4 @@
-name: refresh-token-check
+name: check-tokens
 
 on:
   schedule:
