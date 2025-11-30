@@ -1,0 +1,71 @@
+name: refresh-token-check
+
+on:
+  schedule:
+    - cron: "0 19 * * 0-4"   # Sun-Thu at 19:00 UTC
+  workflow_dispatch:
+
+jobs:
+  check-tokens:
+    runs-on: ubuntu-latest
+    env:
+      ACCESS_JSON_SARAS: ${{ secrets.ACCESS_JSON_SARAS }}
+      ACCESS_TOKEN_SARAS: ${{ secrets.ACCESS_TOKEN_SARAS }}
+      ACCESS_JSON_VS: ${{ secrets.ACCESS_JSON_VS }}
+      ACCESS_TOKEN_VS: ${{ secrets.ACCESS_TOKEN_VS }}
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install kiteconnect
+        run: pip install kiteconnect
+
+      - name: Validate SARAS and VS tokens (kite.profile)
+        run: |
+          python - <<'PY'
+          import os, sys, json
+          from kiteconnect import KiteConnect
+
+          def require_env(var):
+              v = os.environ.get(var)
+              if not v:
+                  print(f"Missing required env: {var}", file=sys.stderr)
+                  sys.exit(1)
+              return v
+
+          def parse_access_json(env_name):
+              jstr = require_env(f"ACCESS_JSON_{env_name}")
+              try:
+                  data = json.loads(jstr)
+              except Exception as e:
+                  print(f"Invalid JSON in ACCESS_JSON_{env_name}: {e}", file=sys.stderr)
+                  sys.exit(1)
+              api_key = data.get("api_key")
+              if not api_key:
+                  print(f"ACCESS_JSON_{env_name} missing 'api_key'", file=sys.stderr)
+                  sys.exit(1)
+              return data, api_key
+
+          def check_account(env_name):
+              # parse JSON blob to extract api_key
+              data, api_key = parse_access_json(env_name)
+              access_token = require_env(f"ACCESS_TOKEN_{env_name}")
+
+              kite = KiteConnect(api_key=api_key)
+              kite.set_access_token(access_token)
+              try:
+                  profile = kite.profile()
+                  print(f"[OK] {env_name} — user_id: {profile.get('user_id')}")
+              except Exception as e:
+                  print(f"[FAILED] {env_name} — token invalid or API error: {e}", file=sys.stderr)
+                  sys.exit(1)
+
+          # Check SARAS then VS sequentially
+          check_account("SARAS")
+          check_account("VS")
+
+          print("All token checks passed.")
+          PY
