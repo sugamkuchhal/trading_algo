@@ -8,6 +8,7 @@ on:
 jobs:
   check-tokens:
     runs-on: ubuntu-latest
+    
     env:
       ACCESS_JSON_SARAS: ${{ secrets.ACCESS_JSON_SARAS }}
       ACCESS_TOKEN_SARAS: ${{ secrets.ACCESS_TOKEN_SARAS }}
@@ -21,7 +22,8 @@ jobs:
           python-version: "3.11"
 
       - name: Install kiteconnect
-        run: pip install kiteconnect
+        run: |
+          pip install kiteconnect
 
       - name: Run token check script
         run: python tools/check_tokens.py
